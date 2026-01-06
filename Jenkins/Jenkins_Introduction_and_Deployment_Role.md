@@ -15,39 +15,57 @@
 
 **是的，Jenkins 完全具備處理部署工作的能力。** 
 
-在傳統的自動化流程中，Jenkins 採用 **Push-based（推播式）** 模式來完成部署：
-
-### 常見的部署方式：
-*   **腳本部署**：透過 Shell Script、`scp`、`ssh` 等指令將編譯好的檔案傳送到伺服器並重啟服務。
-*   **組態管理工具**：整合 Ansible、SaltStack 或 Terraform 等工具來自動化基礎設施的部署。
-*   **容器化部署**：執行 `docker-compose up` 或 `kubectl apply` 來更新容器服務。
-
-### 優點：
-*   **極高靈活性**：支援各種環境（VM、實體機、雲端平台）。
-*   **流程一體化**：從測試到部署都在同一個 Pipeline 中完成，易於追蹤。
+Jenkins 的部署策略主要取決於目標環境是 **「虛擬機/實體機」** 還是 **「容器叢集 (K8s)」**。這兩者的運作邏輯截然不同。
 
 ---
 
-## 3. 現代化架構中的職責分離：Jenkins + ArgoCD
+## 3. 虛擬機 (VM) 與實體機的部署模式：Push-based
 
-雖然 Jenkins 可以執行部署，但在現代 Kubernetes 環境中，業界傾向將 **CI (持續整合)** 與 **CD (持續部署)** 權責分離，以提升安全性和穩定性。
+在傳統計算環境中（如 EC2, On-Premise Servers），Jenkins 通常扮演 **「指揮官」** 的角色，採用 **推播式 (Push-based)** 的方式直接控制目標伺服器。
 
-### 職責分工：
-1.  **Jenkins 負責 CI (持續整合)**：
+### 運作方式
+1.  **CI 階段**：Jenkins 完成編譯與測試，產出執行檔（Artifact，如 `.jar`, `.exe`, `.tar.gz`）。
+2.  **傳輸階段**：Jenkins 透過 SSH 將檔案推送到目標伺服器。
+3.  **執行階段**：Jenkins 下達指令（或呼叫 Ansible Playbook）停止舊服務、替換檔案、重啟服務。
+
+### 常用工具搭配
+*   **Shell Script + SSH**：最簡單直接，適合小型專案。
+    *   *流程*：`scp` 上傳檔案 -> `ssh` 遠端執行 `systemctl restart`。
+*   **Ansible / SaltStack**：適合中大型專案，具備冪等性 (Idempotency) 與組態管理能力。
+    *   *流程*：Jenkins 呼叫 Ansible Playbook -> Ansible 負責所有伺服器的更新與重啟。
+
+### 特點
+*   **Jenkins 權限較大**：Jenkins 需要持有目標伺服器的 SSH Key 或連線憑證。
+*   **即時性強**：部署指令下達後立即執行，Jenkins Console 可即時看到所有伺服器的回應日誌。
+
+---
+
+## 4. Kubernetes (K8s) 的部署模式：Pull-based (GitOps)
+
+在容器化與 K8s 環境中，為了提升安全性與狀態一致性，業界傾向將 **CI** 與 **CD** 權責分離，採用 **拉取式 (Pull-based)** 模式。
+
+### 運作方式
+1.  **Jenkins 負責 CI**：
     *   程式碼掃描與測試。
     *   打包 Docker Image 並上傳至 Image Registry。
-    *   **更新 Git 配置倉庫**（例如修改 Helm Chart 或 YAML 中的 Tag）。
-2.  **ArgoCD 負責 CD (持續部署)**：
-    *   監控 Git 倉庫的狀態。
-    *   採用 **Pull-based (拉取式 / GitOps)** 模式，主動同步設定到 K8s 叢集。
+    *   **更新 Git 配置倉庫**（例如修改 Helm Chart 或 YAML 中的 Tag 為新版本）。
+    *   *注意：Jenkins 不直接連線到 K8s Cluster。*
+2.  **ArgoCD 負責 CD**：
+    *   ArgoCD 監控 Git 配置倉庫的狀態。
+    *   發現版本變更後，**主動拉取 (Pull)** 新設定並同步到 K8s 叢集。
 
-### 為什麼要分開？
-*   **安全性**：Jenkins 不再需要持有目標環境（如生產環境 K8s）的最高存取權限。
-*   **自我修復**：ArgoCD 會持續監控叢集狀態，若有人手動更改 K8s 設定，它會自動將其還原為 Git 上定義的狀態。
+### 特點
+*   **安全性高**：Jenkins 不需要持有 K8s Cluster 的 Admin 權限 (Kubeconfig)。
+*   **自我修復**：K8s 實際狀態永遠與 Git 保持一致，防止人為誤操作（Configuration Drift）。
 
 ---
 
-## 4. 總結與建議
+## 5. 總結與建議選型
 
-*   **若部署目標為虛擬機 (VM) 或實體機**：Jenkins 是最直觀且強大的選擇，可透過 Pipeline 直接管理部署流程。
-*   **若部署目標為 Kubernetes (K8s)**：建議將 Jenkins 定位為 CI 工具，負責產出 Artifact (Image)，並將部署的任務交給專門的 GitOps 工具（如 ArgoCD）處理。
+| 比較項目 | VM / 實體機部署 | Kubernetes (K8s) 部署 |
+| :--- | :--- | :--- |
+| **推薦模式** | **Jenkins + Ansible (Push)** | **Jenkins + ArgoCD (GitOps)** |
+| **Jenkins 角色** | 全能型 (包辦 CI + CD) | 專注 CI (產出 Image + 更新 Git) |
+| **部署發起者** | Jenkins 主動發起 | ArgoCD 偵測 Git 變更後發起 |
+| **優點** | 架構簡單直觀，控制力強 | 安全性高，具備版本回滾與漂移偵測能力 |
+| **適用場景** | 傳統應用架構、單體式應用 | 微服務架構、容器化應用 |
